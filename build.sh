@@ -21,5 +21,13 @@ cat > $APP/Contents/Info.plist <<PLIST
   <key>ATSApplicationFontsPath</key><string>.</string>
 </dict></plist>
 PLIST
-codesign --force --sign - $APP
+# Sign with a stable local identity if one exists, so the Accessibility grant
+# survives rebuilds. Ad-hoc signing ties the grant to the binary hash instead.
+IDENTITY="${SIGN_IDENTITY:-Tyler Local Code Signing}"
+if security find-identity -p codesigning | grep -q "$IDENTITY"; then
+  codesign --force --sign "$IDENTITY" $APP
+else
+  echo "warning: '$IDENTITY' not found, ad-hoc signing (Accessibility resets each build)"
+  codesign --force --sign - $APP
+fi
 echo "Built $PWD/$APP"

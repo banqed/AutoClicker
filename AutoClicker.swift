@@ -22,8 +22,9 @@ enum StopMode: String, CaseIterable, Identifiable {
 struct ClickConfig {
     var intervalMs: Double
     var jitterMs: Double
-    var burstCount: Int
-    var burstGapMs: Double
+    var pauseEnabled: Bool
+    var pauseEvery: Int
+    var pauseSec: Double
     var button: MouseButtonChoice
     var kind: ClickKind
     var stopMode: StopMode
@@ -44,26 +45,33 @@ final class ClickEngine {
 
     /// Runs on a background thread. `onClick` reports total clicks; `onFinish` fires when the loop exits.
     func start(_ cfg: ClickConfig, startDelay: Double,
-               onClick: @escaping (Int) -> Void, onFinish: @escaping () -> Void) {
+               onClick: @escaping (Int) -> Void, onPause: @escaping (Bool) -> Void,
+               onFinish: @escaping () -> Void) {
         guard !running else { return }
         running = true
         Thread.detachNewThread { [self] in
             if startDelay > 0 { sleepInterruptible(startDelay) }
             let began = Date()
             var total = 0
-            outer: while running {
-                for i in 0..<max(1, cfg.burstCount) {
-                    guard running else { break outer }
-                    click(cfg)
-                    total += 1
-                    onClick(total)
-                    if cfg.stopMode == .afterClicks && total >= cfg.stopValue { break outer }
-                    if i < cfg.burstCount - 1 { sleepInterruptible(cfg.burstGapMs / 1000) }
+            func timeUp() -> Bool {
+                cfg.stopMode == .afterSeconds && Date().timeIntervalSince(began) >= Double(cfg.stopValue)
+            }
+            while running {
+                click(cfg)
+                total += 1
+                onClick(total)
+                if cfg.stopMode == .afterClicks && total >= cfg.stopValue { break }
+                if timeUp() { break }
+                if cfg.pauseEnabled && cfg.pauseEvery > 0 && total % cfg.pauseEvery == 0 {
+                    // Rest, then pick up clicking again.
+                    onPause(true)
+                    sleepInterruptible(max(0, cfg.pauseSec))
+                    onPause(false)
+                } else {
+                    let jitter = cfg.jitterMs > 0 ? Double.random(in: -cfg.jitterMs...cfg.jitterMs) : 0
+                    sleepInterruptible(max(1, cfg.intervalMs + jitter) / 1000)
                 }
-                if cfg.stopMode == .afterSeconds && Date().timeIntervalSince(began) >= Double(cfg.stopValue) { break }
-                let jitter = cfg.jitterMs > 0 ? Double.random(in: -cfg.jitterMs...cfg.jitterMs) : 0
-                sleepInterruptible(max(1, cfg.intervalMs + jitter) / 1000)
-                if cfg.stopMode == .afterSeconds && Date().timeIntervalSince(began) >= Double(cfg.stopValue) { break }
+                if timeUp() { break }
             }
             running = false
             onFinish()
@@ -135,8 +143,10 @@ final class HotKey {
 final class ClickerModel: ObservableObject {
     @AppStorage("intervalMs") var intervalMs: Double = 100
     @AppStorage("jitterMs") var jitterMs: Double = 0
-    @AppStorage("burstCount") var burstCount: Int = 1
-    @AppStorage("burstGapMs") var burstGapMs: Double = 20
+    @AppStorage("pauseEnabled") var pauseEnabled: Bool = false
+    @AppStorage("pauseEvery") var pauseEvery: Int = 10
+    @AppStorage("pauseSec") var pauseSec: Double = 5
+    @Published var isPaused = false
     @AppStorage("button") var button: MouseButtonChoice = .left
     @AppStorage("kind") var kind: ClickKind = .single
     @AppStorage("stopMode") var stopMode: StopMode = .never
@@ -174,15 +184,16 @@ final class ClickerModel: ObservableObject {
     func start() {
         guard !isRunning else { return }
         guard AXIsProcessTrusted() else { requestAccess(); return }
-        let cfg = ClickConfig(intervalMs: intervalMs, jitterMs: jitterMs, burstCount: burstCount,
-                              burstGapMs: burstGapMs, button: button, kind: kind,
+        let cfg = ClickConfig(intervalMs: intervalMs, jitterMs: jitterMs, pauseEnabled: pauseEnabled,
+                              pauseEvery: max(1, pauseEvery), pauseSec: pauseSec, button: button, kind: kind,
                               stopMode: stopMode, stopValue: max(1, stopValue),
                               useFixedPoint: useFixedPoint, fixedPoint: CGPoint(x: fixedX, y: fixedY))
         clickCount = 0
         isRunning = true
         engine.start(cfg, startDelay: startDelay,
                      onClick: { n in DispatchQueue.main.async { self.clickCount = n } },
-                     onFinish: { DispatchQueue.main.async { self.isRunning = false } })
+                     onPause: { p in DispatchQueue.main.async { self.isPaused = p } },
+                     onFinish: { DispatchQueue.main.async { self.isRunning = false; self.isPaused = false } })
     }
 
     func stop() { engine.stop() }
@@ -420,10 +431,9 @@ struct ContentView: View {
     @StateObject private var m = ClickerModel()
 
     private var cps: String {
-        let perCycle = Double(max(1, m.burstCount))
-        let cycleMs = m.intervalMs + Double(max(0, m.burstCount - 1)) * m.burstGapMs
-        guard cycleMs > 0 else { return "—" }
-        return String(format: "≈ %.1f clicks/sec", perCycle * 1000 / cycleMs)
+        if m.isPaused { return "Paused…" }
+        guard m.intervalMs > 0 else { return "—" }
+        return String(format: "≈ %.1f clicks/sec", 1000 / m.intervalMs)
     }
 
     var body: some View {
@@ -451,18 +461,23 @@ struct ContentView: View {
                     }
                 }
 
-                ClassicGroup(title: "Burst") {
-                    Grid(alignment: .leading, verticalSpacing: 8) {
-                        GridRow {
-                            label("Clicks per burst")
-                            HStack(spacing: 4) {
-                                ClassicField(value: $m.burstCount, format: .number, width: 50)
-                                ClassicStepper(value: $m.burstCount, range: 1...100)
+                ClassicGroup(title: "Pause") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ClassicCheckbox(label: "Take a break while clicking", isOn: $m.pauseEnabled)
+                        Grid(alignment: .leading, verticalSpacing: 8) {
+                            GridRow {
+                                label("Every")
+                                HStack(spacing: 4) {
+                                    ClassicField(value: $m.pauseEvery, format: .number, width: 50)
+                                    ClassicStepper(value: $m.pauseEvery, range: 1...10000)
+                                    label("clicks")
+                                }
                             }
+                            row("Pause for", $m.pauseSec, "sec")
                         }
-                        row("Gap in burst", $m.burstGapMs, "ms")
-                            .opacity(m.burstCount <= 1 ? 0.35 : 1)
-                            .disabled(m.burstCount <= 1)
+                        .padding(.leading, 17)
+                        .opacity(m.pauseEnabled ? 1 : 0.35)
+                        .disabled(!m.pauseEnabled)
                     }
                 }
 

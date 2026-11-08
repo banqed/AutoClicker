@@ -6,7 +6,7 @@ A small macOS auto clicker with a 1-bit, classic-Mac-style interface.
 
 - Click interval with optional random jitter (±ms)
 - Start delay
-- Bursts: several clicks per cycle with a configurable gap
+- Pause: rest for a set time after every N clicks, then keep going
 - Left, right or middle button; single or double click
 - Click at the cursor or at a fixed screen position (Pick it with a 3-second countdown)
 - Stop manually, after N clicks, or after N seconds
