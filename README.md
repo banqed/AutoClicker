@@ -1,3 +1,5 @@
+<img width="760" height="1034" alt="image" src="https://github.com/user-attachments/assets/c5d5efba-42fd-4e98-8144-07d539773259" />
+
 # AutoClicker
 
 A small macOS auto clicker with a 1-bit, classic-Mac-style interface.
